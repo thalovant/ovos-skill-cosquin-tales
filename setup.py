@@ -14,24 +14,29 @@ BASE_PATH = path.abspath(path.join(path.dirname(__file__), "."))
 
 
 def get_version():
-    """Find the version of the package"""
+    """Find the version of the package.
+
+    ``VERSION_LOCAL`` is Thalovant's PEP 440 local label (``thalovant.N``).
+    This fork builds upstream's version numbers with different code, and PyPI
+    refuses local versions, so a pin on ``X.Y.Z+thalovant.N`` can only resolve
+    to the wheel on Thalovant's skill index, never to upstream's release.
+    """
     version_file = path.join(BASE_PATH, "version.py")
-    major, minor, build, alpha = (None, None, None, None)
+    values = {}
     with open(version_file) as f:
         for line in f:
-            if "VERSION_MAJOR" in line:
-                major = line.split("=")[1].strip()
-            elif "VERSION_MINOR" in line:
-                minor = line.split("=")[1].strip()
-            elif "VERSION_BUILD" in line:
-                build = line.split("=")[1].strip()
-            elif "VERSION_ALPHA" in line:
-                alpha = line.split("=")[1].strip()
-            if (major and minor and build and alpha) or "# END_VERSION_BLOCK" in line:
+            if "# END_VERSION_BLOCK" in line:
                 break
-    version = f"{major}.{minor}.{build}"
+            name, sep, value = line.partition("=")
+            if sep and name.strip().startswith("VERSION_"):
+                values[name.strip()] = value.split("#", 1)[0].strip().strip("\"'")
+    version = f"{values['VERSION_MAJOR']}.{values['VERSION_MINOR']}.{values['VERSION_BUILD']}"
+    alpha = values.get("VERSION_ALPHA", "0")
     if alpha and int(alpha) > 0:
         version += f"a{alpha}"
+    local = values.get("VERSION_LOCAL", "")
+    if local:
+        version += f"+{local}"
     return version
 
 

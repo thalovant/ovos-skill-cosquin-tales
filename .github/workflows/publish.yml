@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+      # Thalovant's builds (vX.Y.Z+thalovant.N) are not for PyPI, which refuses
+      # local versions; they go to Thalovant's skill index (MAINTENANCE_REPORT.md).
+      - '!v*\+thalovant.*'
 
 jobs:
   test:

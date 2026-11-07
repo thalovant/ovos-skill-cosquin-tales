@@ -146,3 +146,9 @@ and [ovos-skill-bechstein-tales](https://github.com/andlo/ovos-skill-bechstein-t
 
 ## Tags
 #stories #fairytales #folklore #cosquin #lorraine #french #provider
+
+## Thalovant build
+
+This `thalovant` branch is Thalovant's fork. Its builds are versioned
+`X.Y.Z+thalovant.N` (see `version.py` and `MAINTENANCE_REPORT.md`) and are
+installed from Thalovant's skill index, not from PyPI.
