@@ -654,7 +654,10 @@ class CosquinTales(OVOSSkill):
             self.log.error(f"Could not fetch story '{content_id}': {e}")
             self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, {"paragraphs": []}))
             return
-        self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, {"paragraphs": paragraphs}))
+        result = {"paragraphs": paragraphs}
+        if message.data.get("include_source") is True:
+            result["source"] = {"title": spoken_title(content_id), "url": f"{entry['url']}#{entry['anchor']}"}
+        self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, result))
 
     def handle_ping(self, message):
         """Cheap 'is anyone there?' reply - no index lookup. Only ever
