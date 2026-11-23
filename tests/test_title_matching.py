@@ -64,7 +64,7 @@ def test_search_response_speaks_the_title_in_ordinary_case(indexed):
 
 
 def test_fetch_uses_the_content_id_from_the_search(indexed):
-    indexed.get_story_paragraphs = lambda entry: [entry["anchor"]]
+    indexed._get_story_record = lambda entry: {"paragraphs": [entry["anchor"]]}
     indexed.handle_search(Message("ovos.common_reading.search", {"phrase": "jeanne et brimboriau"}))
     content_id = indexed.bus.emit.call_args[0][0].data["content_id"]
     indexed.handle_fetch_content(Message("ovos.common_reading.fetch_content.x", {"content_id": content_id}))

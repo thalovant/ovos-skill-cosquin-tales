@@ -39,8 +39,11 @@ class FakeGutenberg:
         self.pages = pages
         self.requests = []
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, stream=False, allow_redirects=True):
+        assert stream and not allow_redirects
         self.requests.append({"url": url, "headers": dict(headers or {}), "timeout": timeout})
+        if url not in self.pages:
+            raise requests.ConnectionError("unavailable test endpoint")
         page = self.pages[url]
         if callable(page) and not isinstance(page, requests.Response):
             page = page(headers or {})
@@ -53,6 +56,7 @@ def response(content=b"", status=200, last_modified=None):
     r = requests.Response()
     r.status_code = status
     r._content = content
+    r._content_consumed = True
     r.url = "https://www.gutenberg.org/test"
     r.reason = "Not Found" if status == 404 else "OK"
     if last_modified:
