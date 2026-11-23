@@ -37,6 +37,8 @@ from ovos_utils import classproperty
 from ovos_utils.process_utils import RuntimeRequirements
 
 import requests
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 from bs4 import BeautifulSoup, Tag
 from functools import lru_cache
 import re
@@ -244,7 +246,8 @@ except importlib.metadata.PackageNotFoundError:  # run from a checkout
     SKILL_VERSION = "unknown"
 # says who is asking and where to find them, instead of python-requests/x
 USER_AGENT = f"{PYPI_NAME}/{SKILL_VERSION} (+{REPO_URL})"
-FETCH_TIMEOUT = 15  # seconds
+FETCH_TIMEOUT = 4  # seconds per origin
+MAX_BOOK_BYTES = 8 * 1024 * 1024
 # bump whenever a story would extract to different text, so that what an
 # older release cached is fetched again rather than read out as it was
 CACHE_FORMAT = 1
@@ -255,6 +258,34 @@ CACHE_MAX_AGE = 30 * 24 * 3600
 # Gutenberg outage costs one request every few minutes, not one per story
 # asked for
 FAILURE_BACKOFF = 5 * 60
+
+
+
+def archive_url(url):
+    """The official archive copy of a book already in the bundled index."""
+    origin = "https://www.gutenberg.org"
+    if not url.startswith(origin + "/"):
+        return None
+    path = url[len(origin):]
+    match = re.fullmatch(r"/files/([0-9]+)/([A-Za-z0-9_/-]+\.html?)", path)
+    if match:
+        number, filename = match.groups()
+        directories = "/".join(number[:-1]) or "0"
+        path = f"/{directories}/{number}/{filename}"
+    elif not re.fullmatch(r"/cache/epub/[0-9]+/[A-Za-z0-9_-]+\.html?", path):
+        return None
+    return "https://gutenberg.pglaf.org" + path
+
+
+def retry_delay(header):
+    """Respect both HTTP-date and delta-seconds Retry-After values."""
+    value = (header or "").strip()
+    if value.isdigit() and len(value) <= 12:
+        return max(1, int(value))
+    try:
+        return max(1, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return FAILURE_BACKOFF
 
 
 class StoryCache:
@@ -482,6 +513,7 @@ class CosquinTales(OVOSSkill):
         # a book URL, or 'URL#anchor' for a story its page did not yield
         # -> (time.monotonic() of the failure, what failed)
         self._failures = {}
+        self._publisher_retry_at = {}
 
     def _check_backoff(self, key):
         failure = self._failures.get(key)
@@ -494,19 +526,54 @@ class CosquinTales(OVOSSkill):
         del self._failures[key]
 
     def _download(self, url, last_modified=None):
-        """(the page's bytes, its Last-Modified), or (None, last_modified)
-        when it has not changed since last_modified."""
+        """Download only the chosen edition; cap reads on the wire and on the clock."""
         headers = {"User-Agent": USER_AGENT}
         if last_modified:
             headers["If-Modified-Since"] = last_modified
-        try:
-            r = requests.get(url, headers=headers, timeout=FETCH_TIMEOUT)
-            if r.status_code == 304 and last_modified:
+        deadline = time.monotonic() + FETCH_TIMEOUT
+        with requests.get(url, headers=headers, timeout=FETCH_TIMEOUT, stream=True,
+                          allow_redirects=False) as response:
+            if response.status_code == 304 and last_modified:
                 return None, last_modified
-            r.raise_for_status()
-        except requests.RequestException as e:
-            raise StoryFetchError(f"failed to fetch {url}: {e}") from e
-        return r.content, r.headers.get("Last-Modified")
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise StoryFetchError(f"unexpected HTTP {response.status_code} for {url}")
+            size = response.headers.get("Content-Length", "")
+            if size.isdigit() and int(size) > MAX_BOOK_BYTES:
+                raise StoryFetchError(f"book too large at {url}")
+            body = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                if len(body) + len(chunk) > MAX_BOOK_BYTES or time.monotonic() >= deadline:
+                    raise StoryFetchError(f"download limit reached for {url}")
+                body.extend(chunk)
+            return bytes(body), response.headers.get("Last-Modified")
+
+    def _download_edition(self, url, stale):
+        mirror = archive_url(url)
+        origins = [url]
+        if mirror:
+            origins.append(mirror)
+        for source in origins:
+            host = urlsplit(source).netloc
+            if time.monotonic() < self._publisher_retry_at.get(host, 0):
+                continue
+            modified = (stale.get("last_modified") if stale and
+                        stale.get("source_url", url) == source else None)
+            try:
+                content, modified = self._download(source, modified)
+                return content, modified, source
+            except requests.HTTPError as err:
+                if err.response.status_code not in {429, 500, 502, 503, 504}:
+                    raise StoryFetchError(f"failed to fetch {source}: {err}") from err
+                self._publisher_retry_at[host] = time.monotonic() + retry_delay(
+                    err.response.headers.get("Retry-After"))
+            except (requests.Timeout, requests.ConnectionError) as err:
+                if source == url and mirror and not stale:
+                    continue
+                raise StoryFetchError(f"failed to fetch {source}: {err}") from err
+            except requests.RequestException as err:
+                raise StoryFetchError(f"failed to fetch {source}: {err}") from err
+        raise StoryFetchError(f"publisher temporarily unavailable for {url}")
 
     def _fetch_book(self, url, anchor, stale=None):
         """Fetch one book and cache every story of it in the index (and
@@ -514,9 +581,8 @@ class CosquinTales(OVOSSkill):
         Last-Modified: a 304 renews every story cached from that same
         page, and nothing is downloaded."""
         self._check_backoff(url)
-        last_modified = stale.get("last_modified") if stale else None
         try:
-            content, last_modified = self._download(url, last_modified)
+            content, last_modified, source = self._download_edition(url, stale)
         except StoryFetchError as e:
             self._failures[url] = (time.monotonic(), str(e))
             raise
@@ -527,45 +593,48 @@ class CosquinTales(OVOSSkill):
         if content is None:
             renewed = (self._story_cache.get(url, a) for a in anchors)
             self._story_cache.put([dict(r, fetched_at=now) for r in renewed
-                                   if r and r.get("last_modified") == last_modified])
+                                   if r and r.get("source_url", url) == source and r.get("last_modified") == last_modified])
             return
         stories, errors = extract_book(content, anchors)
         self._story_cache.put([
             {"format": CACHE_FORMAT, "url": url, "anchor": a, "fetched_at": now,
-             "last_modified": last_modified, "paragraphs": paragraphs}
+             "source_url": source, "last_modified": last_modified, "paragraphs": paragraphs}
             for a, paragraphs in stories.items()])
         for a, error in errors.items():
             self.log.error(f"{url}#{a}: {error}")
             self._failures[f"{url}#{a}"] = (time.monotonic(), f"{error} in {url}")
 
     def get_story_paragraphs(self, entry):
-        """A story's paragraphs: from the cache when it has them, else by
+        return self._get_story_record(entry)["paragraphs"]
+
+    def _get_story_record(self, entry):
+        """A story and its source edition: from the cache when available, else by
         fetching the story's book - once for all the stories in it, see
         extract_book(). A copy cached longer ago than CACHE_MAX_AGE is
         still read when the book cannot be fetched again."""
         url, anchor = entry["url"], entry["anchor"]
         record = self._story_cache.get(url, anchor)
         if record and self._story_cache.is_fresh(record):
-            return record["paragraphs"]
+            return record
         with self._fetch_lock:
             # a request for another story of the same book may have
             # fetched it while this one waited
             record = self._story_cache.get(url, anchor)
             if record and self._story_cache.is_fresh(record):
-                return record["paragraphs"]
+                return record
             try:
                 self._check_backoff(f"{url}#{anchor}")
                 self._fetch_book(url, anchor, record)
             except StoryFetchError as e:
                 if record:
                     self.log.warning(f"{e} - reading the copy cached {time.ctime(record['fetched_at'])}")
-                    return record["paragraphs"]
+                    return record
                 raise
             record = self._story_cache.get(url, anchor)
         if record is None:
             failure = self._failures.get(f"{url}#{anchor}")
             raise StoryFetchError(failure[1] if failure else f"no story text at {url}#{anchor}")
-        return record["paragraphs"]
+        return record
 
     def _matches_collection_hint(self, hint):
         if not hint:
@@ -649,14 +718,15 @@ class CosquinTales(OVOSSkill):
             self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, {"paragraphs": []}))
             return
         try:
-            paragraphs = self.get_story_paragraphs(entry)
+            record = self._get_story_record(entry)
         except StoryFetchError as e:
             self.log.error(f"Could not fetch story '{content_id}': {e}")
             self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, {"paragraphs": []}))
             return
-        result = {"paragraphs": paragraphs}
+        result = {"paragraphs": record["paragraphs"]}
         if message.data.get("include_source") is True:
-            result["source"] = {"title": spoken_title(content_id), "url": f"{entry['url']}#{entry['anchor']}"}
+            source_url = record.get("source_url", entry["url"])
+            result["source"] = {"title": spoken_title(content_id), "url": f"{source_url}#{entry['anchor']}"}
         self.bus.emit(message.reply(COMMON_READING_FETCH_CONTENT_RESPONSE, result))
 
     def handle_ping(self, message):

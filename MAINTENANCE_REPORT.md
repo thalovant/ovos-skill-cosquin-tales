@@ -36,3 +36,7 @@ wheel under the same version.
 Claude Code. Actions Taken: wrote the version label, the tag filter, the test
 and this report; ran the test suite. Oversight: prepared for the owner's
 review as a pull request; not merged or released by the AI.
+
+## Publisher maintenance
+
+Local release 3 can read the same indexed book from Project Gutenberg's Literary Archive Foundation mirror when its primary website is temporarily unavailable. The provider respects Retry-After, limits each download, and caches the source URL alongside the paragraphs. Browser previews link to the chapter on the host that supplied its text. Earlier cache entries use their original Gutenberg URL.
