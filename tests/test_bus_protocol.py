@@ -106,11 +106,14 @@ def test_handle_fetch_content_success(skill):
     skill.index = _sample_index()
     skill.get_story_paragraphs = MagicMock(return_value=["Il était une fois.", "Fin."])
 
-    skill.handle_fetch_content(make_message({"content_id": "JEAN DE L'OURS"}))
+    skill.handle_fetch_content(make_message({"include_source": True, "content_id": "JEAN DE L'OURS"}))
 
     sent = skill.bus.emit.call_args[0][0]
     assert sent.msg_type == COMMON_READING_FETCH_CONTENT_RESPONSE
     assert sent.data["paragraphs"] == ["Il était une fois.", "Fin."]
+    entry = skill.index["JEAN DE L'OURS"]
+    assert sent.data["source"]["url"] == f"{entry['url']}#{entry['anchor']}"
+    assert sent.data["source"]["title"] == "Jean de l'Ours"
 
 
 def test_handle_fetch_content_unknown_id_returns_empty(skill):
